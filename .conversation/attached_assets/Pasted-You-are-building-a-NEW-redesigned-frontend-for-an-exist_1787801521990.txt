@@ -1,0 +1,228 @@
+You are building a NEW, redesigned frontend for an existing app called
+"AI Finance Controller" — an autonomous multi-source financial reconciliation
+dashboard. A Python FastAPI backend ALREADY EXISTS and must NOT be modified.
+Your job is ONLY the frontend, and it must connect to the existing backend with
+zero backend changes (same endpoints, same env var).
+
+=====================================================================
+GOAL
+=====================================================================
+Redesign the UI to look like a modern fintech product in the style of the
+Razorpay dashboard: clean, professional, data-dense but calm, with a strong blue
+brand, generous whitespace, crisp tables, rounded cards, subtle shadows, and
+smooth micro-animations. Fully responsive (mobile → desktop). Use OUR product
+name "AI Finance Controller" and our own branding — do NOT use Razorpay's name,
+logo, or trademarks anywhere. This is Razorpay-*inspired* design language only.
+
+=====================================================================
+TECH STACK
+=====================================================================
+- Next.js (App Router) + TypeScript.
+- Tailwind CSS for styling + a small design-token layer (CSS variables).
+- Framer Motion for animations.
+- lucide-react for icons.
+- Native EventSource for SSE. Fetch for REST. No other state library needed
+  (React hooks + a thin API client). Keep dependencies minimal.
+
+=====================================================================
+DESIGN SYSTEM (build this first, as tokens + primitives)
+=====================================================================
+Define tokens as CSS variables and Tailwind theme extensions. Support light AND
+dark mode (class strategy), light default.
+
+Color palette (Razorpay-inspired blues):
+- Brand navy:      #0D2366  (deep), #072654, #02042B (darkest surfaces)
+- Primary blue:    #3395FF (primary), #1E63D0 (hover), #528FF0 (soft)
+- Accent gradient: linear-gradient(135deg,#1E63D0,#3395FF)
+- Surfaces (light): bg #F6F8FB, card #FFFFFF, border #E6EBF1
+- Text (light):    heading #0A1F44, body #46536B, muted #7A899E
+- Surfaces (dark): bg #0A1124, card #111B31, border #1E2A44
+- Text (dark):     heading #EAF0FA, body #A9B6CC, muted #6E7C96
+- Semantic: success #12B76A, warning #F5A623, danger #E5484D, info #3395FF
+Map every reconciliation status to a semantic color:
+  MATCHED→success; UNRESOLVED→warning;
+  MISMATCH_AMOUNT/MISSING_IN_BANK/MISSING_IN_LEDGER/DUPLICATE_UTR/DATE_SKEW/
+  CURRENCY_MISMATCH/SPLIT_SETTLEMENT→danger/neutral exception styling.
+
+Typography: Inter (Google Fonts) with system fallback. Clear type scale
+(display, h1–h4, body, caption, mono for IDs/JSON). Tighten heading letter-spacing.
+
+Shape & depth: radius 12–16px on cards, 8px on controls; soft layered shadows
+(e.g. 0 1px 2px rgba(10,31,68,.06), 0 8px 24px rgba(10,31,68,.06)); 1px hairline
+borders. 8px spacing grid.
+
+Motion (Framer Motion), subtle and fast (150–250ms, ease-out):
+- Cards/sections fade+rise on mount (staggered).
+- Metric numbers count up.
+- Progress bar animates width smoothly; shimmer while running.
+- Table rows expand/collapse for details.
+- Toasts slide in. Respect prefers-reduced-motion.
+
+=====================================================================
+FOLDER STRUCTURE (modular + reusable)
+=====================================================================
+app/
+  layout.tsx              # fonts, theme provider, app shell
+  page.tsx                # dashboard composition (thin — just composes sections)
+  globals.css             # tokens + base
+components/
+  ui/                     # design-system primitives (dumb, reusable):
+    Button.tsx  Card.tsx  Badge.tsx  StatusPill.tsx  StatTile.tsx
+    ProgressBar.tsx  Toggle.tsx  Tabs.tsx  Table.tsx  Drawer.tsx
+    Tooltip.tsx  Skeleton.tsx  Toast.tsx  EmptyState.tsx  CopyButton.tsx
+    CodeBlock.tsx  Timeline.tsx  ThemeToggle.tsx
+  layout/
+    AppShell.tsx  Sidebar.tsx  Topbar.tsx
+  panels/                 # feature panels (compose ui/ primitives):
+    RunControls.tsx  LiveProgress.tsx  MetricsOverview.tsx
+    ExceptionsTable.tsx  AgentStats.tsx  InvestigationChain.tsx
+    AbCompare.tsx  AuditViewer.tsx  Downloads.tsx  HealthBadge.tsx
+lib/
+  api.ts                  # typed API client (all endpoints)
+  types.ts                # shared TS interfaces (Metrics, Decision, AuditEntry…)
+  status.ts               # status→color/label maps
+  useReconcile.ts         # hook: run job + SSE progress + load results/audit
+  format.ts               # ₹/number/percent formatters
+Keep panels presentational; put data-fetching in hooks. No business logic in the
+frontend — the backend owns all reconciliation logic.
+
+=====================================================================
+BACKEND API CONTRACT (DO NOT CHANGE — integrate against this exactly)
+=====================================================================
+Base URL from env: NEXT_PUBLIC_API_URL (e.g. http://localhost:8000). CORS is
+already enabled on the backend.
+
+GET /
+  -> { service, status, groq_key_present, groq_model, groq_model_fallback,
+       confidence_threshold, amount_delta_cap, data_ready, data_dir }
+
+POST /generate   body: { seed:number=42, total:number=60, inject_investigable:boolean=false }
+  -> { ok, paths:{...}, rows:{gateway_settlements,bank_statement,order_ledger,ground_truth},
+       injected: null | { injected:number, cases:[...] } }
+
+POST /reconcile  body: { use_llm:boolean=true, simulate:boolean=false, use_agent:boolean=false }
+  -> { job_id:string, status:string }
+
+GET /status/{job_id}
+  -> { job_id, status:"pending"|"running"|"done"|"error", events:number, latest:object|null, error:string|null }
+
+GET /progress/{job_id}   (Server-Sent Events, text/event-stream)
+  Each message: data: { phase, seq, t, processed?, total?, llm_calls?, last_txn?, last_status?, message? }
+  Terminal message: data: { phase:"stream_end", status:"done"|"error" }
+  Use EventSource; on stream_end (or onerror) close it and fetch /results + /audit.
+
+GET /results/{job_id}
+  -> { job_id, status, ready:boolean, metrics:Metrics, decisions:Decision[], exceptions:Decision[] }
+
+GET /audit/{job_id}      -> AuditEntry[]   (also a downloadable JSON attachment)
+
+POST /compare   body: { simulate:boolean, use_llm:boolean }
+  -> { single:Metrics, agent:Metrics,
+       lift:{txn_id,single,agent,truth}[], regressions:{txn_id,single,agent,truth}[] }
+
+GET /data/{name}.csv     -> CSV download (e.g. ground_truth.csv, gateway_settlements.csv)
+
+TypeScript shapes:
+  Metrics = {
+    total_records, auto_matched, match_rate, exceptions,
+    matched_precision, matched_recall, matched_f1,
+    confusion:{tp,fp,fn,tn}, status_accuracy:number|null,
+    false_positive_count, false_positive_cost,
+    false_positives:{txn_id,order_id,said,truth,money_at_risk,reason,source}[],
+    false_negatives:any[], by_status:Record<string,number>,
+    wall_clock_seconds?, throughput_rps?:number|null, llm_calls?, load_errors?,
+    mode?:"single-shot"|"agent",
+    agent?:{ records_investigated, avg_steps:number|null, total_tool_calls,
+             verdicts_honored, verdicts_overridden_by_guardrail, verdicts_errored,
+             groq?:{ total_calls, peak_rpm, rpm_cap, min_interval_seconds } }
+  }
+  Decision = { txn_id, order_id, status, source, reason, confidence,
+               amount_delta:number|null, matched_utr:string|null, llm_used:boolean }
+  AuditEntry = { txn_id, order_id, timestamp, inputs_seen:any,
+                 rule_or_layer:"deterministic"|"llm-resolver",
+                 ambiguity_reason:string|null,
+                 llm_trace:null | { provider, model, resolution, reason, confidence,
+                   raw, guardrail?, evidence?:any[], agent_steps?, agent_tool_calls? },
+                 decision:Decision }
+
+=====================================================================
+SCREENS / PANELS (single-page dashboard inside an app shell)
+=====================================================================
+App shell: left Sidebar (brand mark "AI Finance Controller", nav items:
+Reconcile, Metrics, Exceptions, Audit, About) + Topbar (backend URL field +
+"Check" button, HealthBadge showing online/model/Groq-key/data-ready, ThemeToggle).
+On mobile the sidebar collapses to a bottom nav or hamburger drawer.
+
+1) RunControls — inputs: backend URL, seed, records (total). Toggles (Toggle/switch
+   components): "use LLM resolver", "investigative agent", "simulate (offline)",
+   "+ investigable cases" (maps to inject_investigable on /generate). Buttons:
+   "Generate data" (POST /generate), "Run reconciliation" (POST /reconcile),
+   "A/B: single-shot vs agent" (POST /compare). Show a helper line explaining
+   agent vs single-shot mode. Disable actions while a job runs.
+
+2) LiveProgress — animated ProgressBar driven by SSE (processed/total). Show
+   phase, processed/total, LLM calls, and last txn→status. Shimmer while running,
+   success state on stream_end. Skeletons before first event.
+
+3) MetricsOverview — responsive grid of StatTiles with count-up numbers:
+   Match rate %, Auto-matched (x/total), Exceptions, Precision, Recall,
+   False positives (green if 0, red if >0), FP cost ₹, Status accuracy,
+   LLM calls, Throughput. If metrics.agent present, an "Investigative agent"
+   panel: records investigated, avg steps, tool calls, verdicts honored vs
+   overridden, Groq calls + peak RPM (cap). Include a small confusion/by_status
+   mini-visual (simple bars, no chart lib needed).
+
+4) ExceptionsTable — filterable table of `exceptions` with FilterPills per status
+   (counts per pill). Columns: txn, StatusPill, source badge, Δ₹, reason. Empty
+   state when none. Sticky header, horizontal scroll on mobile.
+
+5) AbCompare — shown after /compare: a two-row table (single-shot vs agent) with
+   match rate, recall, false positives, status accuracy; then a highlighted
+   "Resolution lift" callout listing lift items (single→agent, truth) and any
+   regressions. Emphasize lift with the accent gradient.
+
+6) AuditViewer — table of audit entries; clicking a row expands an inline detail.
+   For deterministic rows show inputs + rule + decision. For agent rows
+   (llm_trace.evidence present) render an InvestigationChain: a vertical Timeline
+   of steps — tool calls (tool name + args + trimmed observation), thoughts,
+   and the final verdict — plus a header ("Investigation by <model> · N steps ·
+   M tool calls · guardrail: <passed|…>") and the final gated decision. Use
+   CodeBlock + CopyButton for raw JSON.
+
+7) Downloads — buttons linking to GET /audit/{job_id} and GET /data/*.csv
+   (audit JSON, ground truth, settlements). Use anchor downloads.
+
+=====================================================================
+BEHAVIOR & QUALITY
+=====================================================================
+- All data comes from the backend; never fabricate numbers. Handle loading,
+  empty, and error states everywhere (Toast for errors, Skeletons for loading).
+- The backend base URL is editable at runtime (Topbar field) and defaults to
+  NEXT_PUBLIC_API_URL. Persist the last-used URL in localStorage.
+- SSE: open EventSource on /progress/{job_id}; on stream_end/onerror close and
+  fetch /results + /audit; fall back to polling /status if EventSource errors.
+- Fully responsive: cards reflow to 1 column on mobile; tables scroll inside
+  their own container so the page never scrolls horizontally.
+- Accessible: semantic HTML, keyboard-focusable controls, aria labels, visible
+  focus rings, prefers-reduced-motion respected, WCAG AA contrast in both themes.
+- Theme-aware: define full light palette on :root, dark overrides under the dark
+  class AND prefers-color-scheme.
+
+=====================================================================
+CONFIG & DELIVERABLES
+=====================================================================
+- Read backend base from process.env.NEXT_PUBLIC_API_URL; add .env.example with
+  NEXT_PUBLIC_API_URL=http://localhost:8000 and document it in README.
+- Provide: the design-system primitives in components/ui, feature panels in
+  components/panels, the typed api client + hooks in lib/, and a composed
+  dashboard in app/page.tsx.
+- A short README: how to set NEXT_PUBLIC_API_URL, run dev, and that it targets
+  the existing FastAPI backend unchanged.
+- Acceptance: `npm run build` passes with no type errors; the app renders with
+  graceful empty states when the backend is unreachable; when pointed at a
+  running backend, Generate → Run shows live progress, metrics, exceptions,
+  agent investigation chains, A/B lift, and working downloads.
+
+DO NOT modify or assume changes to the backend. Match the API contract above
+exactly. Prioritize a clean, modular, reusable component architecture and a
+polished, responsive, Razorpay-inspired look.
